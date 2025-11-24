@@ -1,5 +1,25 @@
 ## MCMC FUNCTION
 
+## Inputs:
+# Yna: Matrix (number of timepoints x number of regions) of observations including censored and missing data. 
+# Important that censored data not be included as NAs and instead be set at a value equal or lower than the censoring limit
+# X: Matrix (number of timepoints x number of regions) of covariate. Multiple covariates are not implemented yet
+# Adj: Adjacency matrix for the spatial regions
+# cl: Either a number or a matrix of the same size as Yna. Censoring limits
+# beta_init: Initial values for the beta coefficients. A 2x1 vector or NULL (default)
+# sigma2_init: Initial value for sigma2. A positive real or NULL (default)
+# rhos_init: Initial value for the spatial correlation parameter. A number between 0 and 1 or NULL (default)
+# rhot_init: Initial value for the temporal autocorrelation parameter. A number between 0 and 1 or NULL (default)
+# jitter: Switch to change given starting value slightly. Useful for running multiple chains.
+# 0 (default) means no jittering while 1 means jittering
+# beta0mn, beta0sd: The prior mean and SD for beta0
+# beta1mn, beta1sd: The prior mean and SD for beta1
+# a_s, b_s: The hyperparameters for the beta prior on rho_s
+# a_t, b_t: The hyperparameters for the beta prior on rho_t
+# a_sig, b_sig: The hyperparameters for the inverse gamma prior on sigma2
+# niter: Number of thinned iterations. The total length of the chain is niter*nthin
+# nburn: Number of burn-in samples from the thinned iterations. The number of poseterior samples is niter-nburn
+# nthin: Thinning interval. The total length of the chain is niter*nthin
 CensArealCount <- function(Yna, X, C, Adj,cl, 
                            beta_init=NULL, sigma2_init = NULL, rhos_init = NULL, rhot_init = NULL,
                            jitter=0,
@@ -10,11 +30,24 @@ CensArealCount <- function(Yna, X, C, Adj,cl,
                            a_sig = 0.1, b_sig = 0.1,
                            niter=1000, nburn=500, nthin=2){
   
+  ## Input Checks
+  if(dim(X) != dim(Yna)){stop("X and Yna must have the same dimension")}
+  if(dim(C) != dim(Yna)){stop("C and Yna must have the same dimension")}
+  if(length(cl)!=1){if(dim(cl)!=dim(Yna)){stop("cl must either be a scalar or a matrix of same dimension as Yna")}}
+  if(dim(Adj)[1]!=ncol(Yna)){stop("Adj must have the same number of rows as the number of spatial regions")}
+  if(dim(Adj)[2]!=ncol(Yna)){stop("Adj must have the same number of columns as the number of spatial regions")}
+  if(!is.null(beta_init)){if(length(beta_init)!=2){stop("beta_init must be a 2-vector")}}
+  if(!is.null(sigma2_init)){if(sigma2_init<=0){stop("sigma2_init must be a positive real scalar")}}
+  if(!is.null(rhos_init)){if(rhos_init >= 1 | rhos_init <= 0){stop("rhos_init must be a scalar between 0 and 1")}}
+  if(!is.null(rhot_init)){if(rhot_init >= 1 | rhot_init <= 0){stop("rhot_init must be a scalar between 0 and 1")}}
+  
+  ## Input Preps
   ns <- ncol(Yna)
   nt <- nrow(Yna)
   
   M <- diag(rowSums(Adj))
   
+  ## Sorting out censored, non-censored and Missing data in Y and accordingly for X
   Scindsl <- lapply(1:nt,function(i){which(C[i,]==1)})
   Sncindsl <- lapply(1:nt,function(i){which(C[i,]==0)})
   NAindsl <- lapply(1:nt,function(i){which(is.na(Yna[i,]))})
@@ -29,6 +62,8 @@ CensArealCount <- function(Yna, X, C, Adj,cl,
   X_c <- lapply(1:nt,function(i){X[i,Scindsl[[i]]]})
   X_nc <- lapply(1:nt,function(i){X[i,Sncindsl[[i]]]})
   
+  
+  ## Preparing initial values
   if(is.null(beta_init) | is.null(sigma2_init)){
     oo <- glm(unlist(Y_nc) ~ unlist(X_nc),family = 'poisson')
     
@@ -55,6 +90,8 @@ CensArealCount <- function(Yna, X, C, Adj,cl,
   rhot <- rhot_init
   Dtmat <- abs(outer(1:nt,1:nt,"-"))
   
+  # Creating spatial and temporal covariances and precisions
+  
   Sigs_inv <- M - rhos*Adj
   Sigs_inv_c <- chol(Sigs_inv)
   logdet_Sigs_inv <- 2*sum(log(diag(Sigs_inv_c)))
@@ -70,6 +107,7 @@ CensArealCount <- function(Yna, X, C, Adj,cl,
   Sigt_inv[udi] <- -rhot
   Sigt_inv <- Sigt_inv/(1-(rhot^2))
   
+  ## Computing initial latent variables
   
   U <- t(chol(Sigt))%*%matrix(rnorm(ns*nt),nt,ns)%*%chol(Sigs)
   
@@ -80,6 +118,7 @@ CensArealCount <- function(Yna, X, C, Adj,cl,
   
   Uquad <- sum((Sigt_inv%*%U)*(U%*%Sigs_inv))
   
+  ## Storage
   nsamp <- niter-nburn
   
   keep_beta0 <- rep(NA,nsamp)
@@ -89,6 +128,7 @@ CensArealCount <- function(Yna, X, C, Adj,cl,
   keep_rhot <- rep(NA,nsamp)
   keep_U <- array(NA,dim=c(nsamp,nt,ns))
   
+  # proposal sd for MH updates
   mh_beta0 <- 1
   mh_beta1 <- 1
   mh_sigma2 <- 1
@@ -96,6 +136,7 @@ CensArealCount <- function(Yna, X, C, Adj,cl,
   mh_rhot <- 1
   mh_U <- 1
   
+  # Keeping track of acceptance rate
   acc_beta0 <- acc_beta1 <- acc_sigma2 <- acc_rhos <- acc_rhot <- acc_U <- 0
   
   ppc <- function(x){ppois(cl,x,log.p=T)}
@@ -237,7 +278,7 @@ CensArealCount <- function(Yna, X, C, Adj,cl,
       
     }
     
-    
+    # Tuning the proposal variances if needed
     if(i < (nburn/2)){
       mh_beta0 <- ifelse(acc_beta0 < 0.3, mh_beta0*.8,ifelse(acc_beta0 > 0.5, mh_beta0*1.2,mh_beta0))
       mh_beta1 <- ifelse(acc_beta1 < 0.3, mh_beta1*.8,ifelse(acc_beta1 > 0.5, mh_beta1*1.2,mh_beta1))
@@ -250,6 +291,7 @@ CensArealCount <- function(Yna, X, C, Adj,cl,
       acc_U <- 0
     }
     
+    # Storing the samples
     if(i > nburn){
       ind <- i - nburn
       keep_beta0[ind] <- beta0
